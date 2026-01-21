@@ -1,106 +1,30 @@
-name: "CodeQL"
+Usage:
 
-on:
-  push:
-    branches: [ "master" ]
-  pull_request:
-    branches: [ "master" ]
-  schedule:
-    - cron: "0 3 * * 1"
+    wrmdep [-a | -all | all] [file]
 
-jobs:
-  analyze:
-    name: Analyze (CodeQL)
-    runs-on: ubuntu-latest
+        Remove all .dep files or remove .dep files referring to <file>
+        With the -a/-all/all option the .dep files are removed for all
+        platform rather than just the current platform.
 
-    permissions:
-      contents: read
-      actions: read
-      security-events: write
+    wrmdep [-o | -old] [dir1 .. dirN]
 
-    strategy:
-      fail-fast: false
-      matrix:
-        language: [ "cpp" ]
+        Remove *.dep files that are without a corresponding .C or .L file.
+        This occurs when a directory has been moved.
+          - prints the questionable directory and *.dep file
 
-    env:
-      WM_NCOMPPROCS: "2"
-      BUILD_CORE_ONLY: "0"
+        Note: to remove empty directories, run: wclean empty
 
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-        with:
-          fetch-depth: 2
+    wrmdep -update
 
-      - name: Initialize CodeQL
-        uses: github/codeql-action/init@v3
-        with:
-          languages: ${{ matrix.language }}
+        Search all the "src" and "application" directories of the project for
+        broken symbolic links for source code files and then remove all .dep
+        files that relate to files that no longer exist.
+        Must be executed in the project top-level directory: /home/runner/work/OpenFOAM-dev/OpenFOAM-dev
 
-      - name: Install baseline build dependencies
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y \
-            build-essential \
-            gcc g++ \
-            make \
-            flex bison \
-            libfl-dev \
-            cmake \
-            zlib1g-dev \
-            libboost-system-dev libboost-thread-dev \
-            libopenmpi-dev openmpi-bin \
-            git ca-certificates \
-            python3 perl \
-            pkg-config \
-            file \
-            time
-
-      - name: Build OpenFOAM (manual)
-        shell: bash --noprofile --norc {0}
-        run: |
-          # Start non-strict: avoid errexit/pipefail issues while sourcing OpenFOAM env.
-          set +e
-          set +u
-          set +o pipefail
-
-          mkdir -p _logs
-
-          # Guard for shells that treat unset vars harshly
-          export ZSH_NAME="${ZSH_NAME:-}"
-
-          source etc/bashrc
-
-          # Enable pipefail for better logging from here on
-          set -o pipefail
-
-          echo "WM_PROJECT_DIR=$WM_PROJECT_DIR" | tee _logs/env.log
-          echo "WM_NCOMPPROCS=$WM_NCOMPPROCS"   | tee -a _logs/env.log
-          echo "BUILD_CORE_ONLY=$BUILD_CORE_ONLY" | tee -a _logs/env.log
-
-          if [ "$BUILD_CORE_ONLY" = "1" ] && [ -f "src/Allwmake" ]; then
-            echo "Building core libraries only (src/Allwmake)..." | tee _logs/build-mode.log
-            (cd src && ./Allwmake -j "$WM_NCOMPPROCS") 2>&1 | tee _logs/build-src.log
-            build_rc=${PIPESTATUS[0]}
-          else
-            echo "Building full OpenFOAM (./Allwmake)..." | tee _logs/build-mode.log
-            ./Allwmake -j "$WM_NCOMPPROCS" 2>&1 | tee _logs/build-full.log
-            build_rc=${PIPESTATUS[0]}
-          fi
-
-          echo "Build exit code: $build_rc" | tee -a _logs/build-result.log
-          exit $build_rc
-
-      - name: Perform CodeQL Analysis
-        uses: github/codeql-action/analyze@v3
-        with:
-          category: "/language:${{ matrix.language }}"
-
-      - name: Upload build logs (always)
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: openfoam-build-logs
-          path: _logs/
-          if-no-files-found: ignore
+make: *** No rule to make target '/home/runner/work/OpenFOAM-dev/OpenFOAM-dev/platforms/linux64GccDPInt32Opt/src/parallel/decompose/scotch/scotch.C.dep', needed by '/home/runner/work/OpenFOAM-dev/OpenFOAM-dev/platforms/linux64GccDPInt32Opt/src/parallel/decompose/scotch/scotch.o'.  Stop.
++ rc=2
++ echo 'Smoke build exit code: 2'
++ tee -a /home/runner/work/OpenFOAM-dev/OpenFOAM-dev/_logs/build-scotch.log
+Smoke build exit code: 2
++ exit 2
+Error: Process completed with exit code 2.

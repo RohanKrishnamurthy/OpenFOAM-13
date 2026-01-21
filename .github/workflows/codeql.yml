@@ -46,6 +46,7 @@ jobs:
             gcc g++ \
             make \
             flex bison \
+            libfl-dev \
             cmake \
             zlib1g-dev \
             libboost-system-dev libboost-thread-dev \
@@ -56,24 +57,22 @@ jobs:
             file \
             time
 
-      # IMPORTANT: override the default GitHub Actions bash flags (-e -o pipefail)
       - name: Build OpenFOAM (manual)
         shell: bash --noprofile --norc {0}
         run: |
-          # Start non-strict: avoid errexit/pipefail while sourcing OpenFOAM env.
+          # Start non-strict: avoid errexit/pipefail issues while sourcing OpenFOAM env.
           set +e
           set +u
           set +o pipefail
 
           mkdir -p _logs
 
-          # Avoid "unbound variable" surprises from strict shells
+          # Guard for shells that treat unset vars harshly
           export ZSH_NAME="${ZSH_NAME:-}"
 
-          # Source OpenFOAM environment
           source etc/bashrc
 
-          # Now enable safer options for the actual build steps/logging
+          # Enable pipefail for better logging from here on
           set -o pipefail
 
           echo "WM_PROJECT_DIR=$WM_PROJECT_DIR" | tee _logs/env.log

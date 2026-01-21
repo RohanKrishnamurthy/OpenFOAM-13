@@ -6,7 +6,7 @@ on:
   pull_request:
     branches: [ "master" ]
   schedule:
-    - cron: "0 3 * * 1"   # Mondays 03:00 UTC
+    - cron: "0 3 * * 1"
 
 jobs:
   analyze:
@@ -24,11 +24,7 @@ jobs:
         language: [ "cpp" ]
 
     env:
-      # Keep parallelism low to avoid OOM on GitHub-hosted runners.
       WM_NCOMPPROCS: "2"
-
-      # Optional: set to "1" if you want to try a smaller build first.
-      # If set to "1", it attempts to build just src/ if possible.
       BUILD_CORE_ONLY: "0"
 
     steps:
@@ -41,16 +37,10 @@ jobs:
         uses: github/codeql-action/init@v3
         with:
           languages: ${{ matrix.language }}
-          # Optional: you can add query packs here later (e.g. security-extended)
-          # queries: +security-extended
 
       - name: Install baseline build dependencies
-        shell: bash
         run: |
-          set -euxo pipefail
           sudo apt-get update
-
-          # Baseline toolchain + common build tools.
           sudo apt-get install -y \
             build-essential \
             gcc g++ \
@@ -62,41 +52,46 @@ jobs:
             libopenmpi-dev openmpi-bin \
             git ca-certificates \
             python3 perl \
+            pkg-config \
             file \
             time
 
-          # Handy for debugging missing headers/libs (optional).
-          sudo apt-get install -y pkg-config
-
-      - name: Build OpenFOAM (manual, traced by CodeQL)
-        shell: bash
+      # IMPORTANT: override the default GitHub Actions bash flags (-e -o pipefail)
+      - name: Build OpenFOAM (manual)
+        shell: bash --noprofile --norc {0}
         run: |
-          set -euxo pipefail
+          # Start non-strict: avoid errexit/pipefail while sourcing OpenFOAM env.
+          set +e
+          set +u
+          set +o pipefail
 
-          # OpenFOAM sets up compilers/paths via its bashrc.
-          # This file exists in the OpenFOAM source tree.
-          source etc/bashrc
-
-          echo "WM_PROJECT_DIR=$WM_PROJECT_DIR"
-          echo "WM_NCOMPPROCS=$WM_NCOMPPROCS"
-          echo "BUILD_CORE_ONLY=$BUILD_CORE_ONLY"
-
-          # Some runners have limited disk; keep logs reasonable.
           mkdir -p _logs
 
-          if [ "$BUILD_CORE_ONLY" = "1" ]; then
-            # Try a smaller build first (if src/ has its own Allwmake).
-            if [ -f "src/Allwmake" ]; then
-              echo "Building core libraries only (src/Allwmake)..."
-              (cd src && ./Allwmake -j "$WM_NCOMPPROCS") 2>&1 | tee "_logs/build-src.log"
-            else
-              echo "src/Allwmake not found; falling back to full ./Allwmake"
-              ./Allwmake -j "$WM_NCOMPPROCS" 2>&1 | tee "_logs/build-full.log"
-            fi
+          # Avoid "unbound variable" surprises from strict shells
+          export ZSH_NAME="${ZSH_NAME:-}"
+
+          # Source OpenFOAM environment
+          source etc/bashrc
+
+          # Now enable safer options for the actual build steps/logging
+          set -o pipefail
+
+          echo "WM_PROJECT_DIR=$WM_PROJECT_DIR" | tee _logs/env.log
+          echo "WM_NCOMPPROCS=$WM_NCOMPPROCS"   | tee -a _logs/env.log
+          echo "BUILD_CORE_ONLY=$BUILD_CORE_ONLY" | tee -a _logs/env.log
+
+          if [ "$BUILD_CORE_ONLY" = "1" ] && [ -f "src/Allwmake" ]; then
+            echo "Building core libraries only (src/Allwmake)..." | tee _logs/build-mode.log
+            (cd src && ./Allwmake -j "$WM_NCOMPPROCS") 2>&1 | tee _logs/build-src.log
+            build_rc=${PIPESTATUS[0]}
           else
-            echo "Building full OpenFOAM (./Allwmake)..."
-            ./Allwmake -j "$WM_NCOMPPROCS" 2>&1 | tee "_logs/build-full.log"
+            echo "Building full OpenFOAM (./Allwmake)..." | tee _logs/build-mode.log
+            ./Allwmake -j "$WM_NCOMPPROCS" 2>&1 | tee _logs/build-full.log
+            build_rc=${PIPESTATUS[0]}
           fi
+
+          echo "Build exit code: $build_rc" | tee -a _logs/build-result.log
+          exit $build_rc
 
       - name: Perform CodeQL Analysis
         uses: github/codeql-action/analyze@v3

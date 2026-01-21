@@ -1,0 +1,112 @@
+name: "CodeQL"
+
+on:
+  push:
+    branches: [ "master" ]
+  pull_request:
+    branches: [ "master" ]
+  schedule:
+    - cron: "0 3 * * 1"   # Mondays 03:00 UTC
+
+jobs:
+  analyze:
+    name: Analyze (CodeQL)
+    runs-on: ubuntu-latest
+
+    permissions:
+      contents: read
+      actions: read
+      security-events: write
+
+    strategy:
+      fail-fast: false
+      matrix:
+        language: [ "cpp" ]
+
+    env:
+      # Keep parallelism low to avoid OOM on GitHub-hosted runners.
+      WM_NCOMPPROCS: "2"
+
+      # Optional: set to "1" if you want to try a smaller build first.
+      # If set to "1", it attempts to build just src/ if possible.
+      BUILD_CORE_ONLY: "0"
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 2
+
+      - name: Initialize CodeQL
+        uses: github/codeql-action/init@v3
+        with:
+          languages: ${{ matrix.language }}
+          # Optional: you can add query packs here later (e.g. security-extended)
+          # queries: +security-extended
+
+      - name: Install baseline build dependencies
+        shell: bash
+        run: |
+          set -euxo pipefail
+          sudo apt-get update
+
+          # Baseline toolchain + common build tools.
+          sudo apt-get install -y \
+            build-essential \
+            gcc g++ \
+            make \
+            flex bison \
+            cmake \
+            zlib1g-dev \
+            libboost-system-dev libboost-thread-dev \
+            libopenmpi-dev openmpi-bin \
+            git ca-certificates \
+            python3 perl \
+            file \
+            time
+
+          # Handy for debugging missing headers/libs (optional).
+          sudo apt-get install -y pkg-config
+
+      - name: Build OpenFOAM (manual, traced by CodeQL)
+        shell: bash
+        run: |
+          set -euxo pipefail
+
+          # OpenFOAM sets up compilers/paths via its bashrc.
+          # This file exists in the OpenFOAM source tree.
+          source etc/bashrc
+
+          echo "WM_PROJECT_DIR=$WM_PROJECT_DIR"
+          echo "WM_NCOMPPROCS=$WM_NCOMPPROCS"
+          echo "BUILD_CORE_ONLY=$BUILD_CORE_ONLY"
+
+          # Some runners have limited disk; keep logs reasonable.
+          mkdir -p _logs
+
+          if [ "$BUILD_CORE_ONLY" = "1" ]; then
+            # Try a smaller build first (if src/ has its own Allwmake).
+            if [ -f "src/Allwmake" ]; then
+              echo "Building core libraries only (src/Allwmake)..."
+              (cd src && ./Allwmake -j "$WM_NCOMPPROCS") 2>&1 | tee "_logs/build-src.log"
+            else
+              echo "src/Allwmake not found; falling back to full ./Allwmake"
+              ./Allwmake -j "$WM_NCOMPPROCS" 2>&1 | tee "_logs/build-full.log"
+            fi
+          else
+            echo "Building full OpenFOAM (./Allwmake)..."
+            ./Allwmake -j "$WM_NCOMPPROCS" 2>&1 | tee "_logs/build-full.log"
+          fi
+
+      - name: Perform CodeQL Analysis
+        uses: github/codeql-action/analyze@v3
+        with:
+          category: "/language:${{ matrix.language }}"
+
+      - name: Upload build logs (always)
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: openfoam-build-logs
+          path: _logs/
+          if-no-files-found: ignore

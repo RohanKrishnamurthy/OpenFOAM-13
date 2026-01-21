@@ -1,30 +1,199 @@
-Usage:
+name: CodeQL
 
-    wrmdep [-a | -all | all] [file]
+on:
+  push:
+    branches:
+      - master
+  pull_request:
+    branches:
+      - master
+  schedule:
+    - cron: "0 3 * * 1"
 
-        Remove all .dep files or remove .dep files referring to <file>
-        With the -a/-all/all option the .dep files are removed for all
-        platform rather than just the current platform.
+jobs:
+  analyze:
+    name: Analyze CodeQL
+    runs-on: ubuntu-latest
 
-    wrmdep [-o | -old] [dir1 .. dirN]
+    permissions:
+      contents: read
+      actions: read
+      security-events: write
 
-        Remove *.dep files that are without a corresponding .C or .L file.
-        This occurs when a directory has been moved.
-          - prints the questionable directory and *.dep file
+    env:
+      WM_NCOMPPROCS: "2"
 
-        Note: to remove empty directories, run: wclean empty
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 2
 
-    wrmdep -update
+      - name: Initialize CodeQL
+        uses: github/codeql-action/init@v3
+        with:
+          languages: cpp
 
-        Search all the "src" and "application" directories of the project for
-        broken symbolic links for source code files and then remove all .dep
-        files that relate to files that no longer exist.
-        Must be executed in the project top-level directory: /home/runner/work/OpenFOAM-dev/OpenFOAM-dev
+      - name: Install dependencies
+        shell: bash
+        run: |
+          set -euxo pipefail
+          sudo apt-get update
+          sudo apt-get install -y \
+            build-essential gcc g++ make \
+            flex bison libfl-dev \
+            cmake zlib1g-dev \
+            libboost-system-dev libboost-thread-dev \
+            libopenmpi-dev openmpi-bin \
+            pkg-config python3 perl file time \
+            libscotch-dev libptscotch-dev
 
-make: *** No rule to make target '/home/runner/work/OpenFOAM-dev/OpenFOAM-dev/platforms/linux64GccDPInt32Opt/src/parallel/decompose/scotch/scotch.C.dep', needed by '/home/runner/work/OpenFOAM-dev/OpenFOAM-dev/platforms/linux64GccDPInt32Opt/src/parallel/decompose/scotch/scotch.o'.  Stop.
-+ rc=2
-+ echo 'Smoke build exit code: 2'
-+ tee -a /home/runner/work/OpenFOAM-dev/OpenFOAM-dev/_logs/build-scotch.log
-Smoke build exit code: 2
-+ exit 2
-Error: Process completed with exit code 2.
+      - name: Create wmkdep generator at expected path
+        shell: bash --noprofile --norc {0}
+        run: |
+          set -x
+          set +e
+          set +u
+          set +o pipefail
+
+          mkdir -p _logs
+          export ZSH_NAME="${ZSH_NAME:-}"
+          source etc/bashrc
+          set -o pipefail
+
+          : "${WM_LABEL_SIZE:=32}"
+          : "${WM_PRECISION:=DP}"
+
+          echo "WM_PROJECT_DIR=$WM_PROJECT_DIR" | tee _logs/env.log
+          echo "WM_LABEL_SIZE=$WM_LABEL_SIZE" | tee -a _logs/env.log
+          echo "WM_PRECISION=$WM_PRECISION" | tee -a _logs/env.log
+
+          mkdir -p "$WM_PROJECT_DIR/wmake/platforms/linux64Gcc"
+
+          printf '%s\n' \
+            '#!/usr/bin/env bash' \
+            'set -euo pipefail' \
+            '' \
+            '# CI replacement for OpenFOAM wmkdep: generates a .dep file.' \
+            '# Filters flags/placeholders that GNU g++ -MM does not understand (e.g. -R, $(VARS)).' \
+            '' \
+            'out=""' \
+            'src=""' \
+            'pass=()' \
+            '' \
+            ': "${WM_LABEL_SIZE:=32}"' \
+            ': "${WM_PRECISION:=DP}"' \
+            '' \
+            'args=("$@")' \
+            'skip_next=0' \
+            'for ((i=0; i<${#args[@]}; i++)); do' \
+            '  a="${args[$i]}"' \
+            '' \
+            '  if [[ $skip_next -eq 1 ]]; then' \
+            '    skip_next=0' \
+            '    continue' \
+            '  fi' \
+            '' \
+            '  # Drop make-style variables like $(OBJECTS_DIR)/ etc.' \
+            '  if [[ "$a" == *''$('* ]]; then' \
+            '    continue' \
+            '  fi' \
+            '' \
+            '  # Drop Solaris-style runtime path flags (-R <path> or -R<path>)' \
+            '  if [[ "$a" == "-R" ]]; then' \
+            '    skip_next=1' \
+            '    continue' \
+            '  fi' \
+            '  if [[ "$a" == -R* ]]; then' \
+            '    continue' \
+            '  fi' \
+            '' \
+            '  if [[ "$a" == "-o" && $((i+1)) -lt ${#args[@]} ]]; then' \
+            '    out="${args[$((i+1))]}"' \
+            '    skip_next=1' \
+            '    continue' \
+            '  fi' \
+            '  if [[ "$a" == *.dep ]]; then' \
+            '    out="$a"' \
+            '    continue' \
+            '  fi' \
+            '  if [[ "$a" == *.C || "$a" == *.c || "$a" == *.cc || "$a" == *.cpp || "$a" == *.Cxx || "$a" == *.L ]]; then' \
+            '    src="$a"' \
+            '    continue' \
+            '  fi' \
+            '' \
+            '  pass+=("$a")' \
+            'done' \
+            '' \
+            'if [[ -z "$src" ]]; then' \
+            '  echo "wmkdep: could not determine source file from args: $*" >&2' \
+            '  exit 2' \
+            'fi' \
+            'if [[ -z "$out" ]]; then' \
+            '  out="${src}.dep"' \
+            'fi' \
+            '' \
+            '# Inject OpenFOAM-required macros (wmake may not pass them to wmkdep)' \
+            'pass+=("-DWM_LABEL_SIZE=${WM_LABEL_SIZE}")' \
+            'pass+=("-DWM_${WM_PRECISION}")' \
+            '' \
+            'obj="${out%.dep}.o"' \
+            'mkdir -p "$(dirname "$out")"' \
+            'cxx="${CXX:-g++}"' \
+            '' \
+            '"$cxx" -MM -MG "${pass[@]}" "$src" | sed "1s|^[^:]*:|$obj:|" > "$out"' \
+            'exit 0' \
+            > "$WM_PROJECT_DIR/wmake/platforms/linux64Gcc/wmkdep"
+
+          chmod +x "$WM_PROJECT_DIR/wmake/platforms/linux64Gcc/wmkdep"
+          ls -la "$WM_PROJECT_DIR/wmake/platforms/linux64Gcc" | tee -a _logs/env.log
+
+      - name: Smoke build scotch decomposer
+        shell: bash --noprofile --norc {0}
+        run: |
+          set -x
+          set +e
+          set +u
+          set +o pipefail
+
+          mkdir -p _logs
+          export ZSH_NAME="${ZSH_NAME:-}"
+          source etc/bashrc
+          set -o pipefail
+
+          cd src/parallel/decompose/scotch
+          wmake 2>&1 | tee "$GITHUB_WORKSPACE/_logs/build-scotch.log"
+          rc=${PIPESTATUS[0]}
+          echo "Smoke build exit code: $rc" | tee -a "$GITHUB_WORKSPACE/_logs/build-scotch.log"
+          exit "$rc"
+
+      - name: Full build OpenFOAM
+        shell: bash --noprofile --norc {0}
+        run: |
+          set -x
+          set +e
+          set +u
+          set +o pipefail
+
+          mkdir -p _logs
+          export ZSH_NAME="${ZSH_NAME:-}"
+          source etc/bashrc
+          set -o pipefail
+
+          ./Allwmake -j "$WM_NCOMPPROCS" 2>&1 | tee _logs/build-full.log
+          rc=${PIPESTATUS[0]}
+          echo "Full build exit code: $rc" | tee -a _logs/build-full.log
+          exit "$rc"
+
+      - name: Perform CodeQL Analysis
+        uses: github/codeql-action/analyze@v3
+        with:
+          category: /language:cpp
+
+      - name: Upload build logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: openfoam-build-logs
+          path: _logs/
+          if-no-files-found: ignore

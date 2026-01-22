@@ -1,0 +1,36 @@
+name: KICS
+
+on:
+  push:
+    branches: [ main, releases ]
+  pull_request:
+    branches: [ main, releases ]
+  workflow_dispatch:
+
+jobs:
+  analyze:
+    name: Analyze
+    runs-on: ubuntu-latest
+
+    permissions:
+      contents: read
+      security-events: write
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: KICS scan
+        uses: checkmarx/kics-github-action@v2.1.19
+        with:
+          path: "."
+          fail_on: high
+          disable_secrets: true
+          output_path: kicsResults/
+          output_formats: "json,sarif"
+
+      - name: Upload SARIF to GitHub Security tab
+        if: always()
+        uses: github/codeql-action/upload-sarif@v3
+        with:
+          sarif_file: kicsResults/results.sarif
